@@ -41,6 +41,14 @@ class COMPASData(object):
         self.sw_weights = None
         self.n_systems = None
 
+
+        # stellar merger stuff
+        self.formationTimes = None # for stellar mergers
+        self.StellarMergerMask = None # added for stellar mergers
+        self.prevStellarType1 = None # for stellar mergers
+        self.prevStellarType2 = None # for stellar mergers
+
+
         # Additional arrays that might be nice to store
         # to more quickly make some plots.
         # If you need more memory might help a tiny bit to not do
@@ -61,6 +69,21 @@ class COMPASData(object):
             print("ClassCOMPAS: Remember to self.setCOMPASDCOmask()")
             print("                    then self.setCOMPASData()")
             print("          and optionally self.setGridAndMassEvolved() if using a metallicity grid")
+
+    def setCOMPASStellarMergerMask(self):
+        # Select binaries that undergo a common envelope phase and merge during it (stellar mergers).
+
+        ce_data = self.get_COMPAS_variables("BSE_Common_Envelopes", ["SEED", "Merger"])
+        ce_seeds, ce_merge = ce_data[0], ce_data[1].astype(bool)
+
+        # keep only systems that merge during a CE
+        merged_ce_seeds = ce_seeds[ce_merge]
+
+        # get all sim seeds
+        sys_seeds = self.get_COMPAS_variables("BSE_System_Parameters", "SEED")
+
+        self.StellarMergerMask = np.in1d(sys_seeds, merged_ce_seeds)
+        print(f"Selected {np.sum(self.StellarMergerMask)} systems that merged during CE.")
 
     def setCOMPASDCOmask(
         self, types="BBH", withinHubbleTime=True, pessimistic=True, noRLOFafterCEE=True
@@ -154,37 +177,76 @@ class COMPASData(object):
         self.metallicityGrid = np.unique(self.initialZ)
         Data.close()
 
-    def setCOMPASData(self):
-        
-        primary_masses, secondary_masses, formation_times, coalescence_times, dco_seeds = \
-            self.get_COMPAS_variables("BSE_Double_Compact_Objects", ["Mass(1)", "Mass(2)", "Time", "Coalescence_Time", "SEED"])
+    def setCOMPASData(self, stellar_mergers=False):
 
-        initial_seeds, initial_Z = self.get_COMPAS_variables("BSE_System_Parameters", ["SEED", "Metallicity@ZAMS(1)"])
+        # if stellar mergers, set variables for stellar mergers
+        if stellar_mergers:
+            initial_seeds, initial_Z = self.get_COMPAS_variables("BSE_System_Parameters", ["SEED", "Metallicity@ZAMS(1)"])
+            if self.initialZ is None:
+                self.initialZ = initial_Z
 
-        # Get metallicity grid of DCOs
-        self.seedsDCO = dco_seeds[self.DCOmask]
-        if self.initialZ is None:
-            self.initialZ = initial_Z
-        maskMetallicity = np.in1d(initial_seeds, self.seedsDCO)
-        self.metallicitySystems = self.initialZ[maskMetallicity]
-        self.n_systems = len(initial_seeds)
-
-        self.delayTimes = np.add(formation_times[self.DCOmask], coalescence_times[self.DCOmask])
-        self.mass1 = primary_masses[self.DCOmask]
-        self.mass2 = secondary_masses[self.DCOmask]
-
-        # Stuff of data I dont need for integral
-        # but I might be to laze to read in myself
-        # and often use. Might turn it of for memory efficiency
-        if self.lazyData:
-            self.q = np.divide(self.mass2, self.mass1)
-            boolq = self.mass2 > self.mass1
-            self.q[boolq] = np.divide(self.mass1[boolq], self.mass2[boolq])
-            self.mChirp = np.divide(
-                (np.multiply(self.mass2, self.mass1) ** (3.0 / 5.0)),
-                (np.add(self.mass2, self.mass1) ** (1.0 / 5.0)),
+            self.n_systems = len(initial_seeds)
+            
+            ce_merge, ce_time, ce_seeds, ce_stellartype1, ce_prev_stellartype1, \
+            ce_stellartype2, ce_prev_stellartype2 = self.get_COMPAS_variables(
+                "BSE_Common_Envelopes", ["Merger", "Time", "SEED", 
+                                         "Stellar_Type(1)", "Stellar_Type(1)<CE", 
+                                         "Stellar_Type(2)", "Stellar_Type(2)<CE"]
             )
-            self.Hubble = self.get_COMPAS_variables("BSE_Double_Compact_Objects", "Merges_Hubble_Time")[self.DCOmask]
+    
+            merger_mask = ce_merge.astype(bool)
+            self.StellarMergerMask = merger_mask
+
+
+            # mask for last CE episode
+            ce_seeds = np.asarray(ce_seeds)
+            # reverse array and find first occurrence of each seed in the reversed sequence
+            _, unique_indices = np.unique(ce_seeds[::-1], return_index=True)
+            # map indices back to the original array
+            last_indices = len(ce_seeds) - 1 - unique_indices
+            last_ce_mask = np.zeros(len(ce_seeds), dtype=bool)
+            last_ce_mask[last_indices] = True
+
+            final_mask = np.logical_and(merger_mask, last_ce_mask)
+
+            self.StellarMergerMask = final_mask
+            self.seedsStellarMerger = ce_seeds[self.StellarMergerMask]
+            maskMetallicity = np.in1d(initial_seeds, self.seedsStellarMerger)
+            self.metallicitySystems = self.initialZ[maskMetallicity]
+            self.formationTimes = ce_time[self.StellarMergerMask]
+            self.prevStellarType1 = ce_prev_stellartype1[self.StellarMergerMask]
+            self.prevStellarType2 = ce_prev_stellartype2[self.StellarMergerMask]
+
+        else:
+            primary_masses, secondary_masses, formation_times, coalescence_times, dco_seeds = \
+                self.get_COMPAS_variables("BSE_Double_Compact_Objects", ["Mass(1)", "Mass(2)", "Time", "Coalescence_Time", "SEED"])
+
+            initial_seeds, initial_Z = self.get_COMPAS_variables("BSE_System_Parameters", ["SEED", "Metallicity@ZAMS(1)"])
+
+            # Get metallicity grid of DCOs
+            self.seedsDCO = dco_seeds[self.DCOmask]
+            if self.initialZ is None:
+                self.initialZ = initial_Z
+            maskMetallicity = np.in1d(initial_seeds, self.seedsDCO)
+            self.metallicitySystems = self.initialZ[maskMetallicity]
+            self.n_systems = len(initial_seeds)
+
+            self.delayTimes = np.add(formation_times[self.DCOmask], coalescence_times[self.DCOmask])
+            self.mass1 = primary_masses[self.DCOmask]
+            self.mass2 = secondary_masses[self.DCOmask]
+
+            # Stuff of data I dont need for integral
+            # but I might be to laze to read in myself
+            # and often use. Might turn it of for memory efficiency
+            if self.lazyData:
+                self.q = np.divide(self.mass2, self.mass1)
+                boolq = self.mass2 > self.mass1
+                self.q[boolq] = np.divide(self.mass1[boolq], self.mass2[boolq])
+                self.mChirp = np.divide(
+                    (np.multiply(self.mass2, self.mass1) ** (3.0 / 5.0)),
+                    (np.add(self.mass2, self.mass1) ** (1.0 / 5.0)),
+                )
+                self.Hubble = self.get_COMPAS_variables("BSE_Double_Compact_Objects", "Merges_Hubble_Time")[self.DCOmask]
 
     def recalculateTrueSolarMassEvolved(self, Mlower, Mupper, binaryFraction):
         # Possibility to test assumptions of True solar mass evolved

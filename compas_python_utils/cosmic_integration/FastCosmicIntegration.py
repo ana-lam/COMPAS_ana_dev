@@ -310,7 +310,7 @@ def find_detection_probability(Mc, eta, redshifts, distances, n_redshifts_detect
 
     return detection_probability
 
-def find_detection_rate(path, dco_type="BBH", merger_output_filename=None, weight_column=None,
+def find_detection_rate(path, dco_type="BBH", merger_output_path=None, weight_column=None,
                         merges_hubble_time=True, pessimistic_CEE=True, no_RLOF_after_CEE=True,
                         max_redshift=10.0, max_redshift_detection=1.0, redshift_step=0.001, z_first_SF = 10,
                         use_sampled_mass_ranges=True, m1_min=5 * u.Msun, m1_max=150 * u.Msun, m2_min=0.1 * u.Msun, fbin=0.7,
@@ -333,7 +333,7 @@ def find_detection_rate(path, dco_type="BBH", merger_output_filename=None, weigh
             ===================================================
             path                   --> [string] Path to the COMPAS data file that contains the output
             dco_type               --> [string] Which DCO type to calculate rates for: one of ["all", "BBH", "BHNS", "BNS"]
-            merger_output_filename --> [string] Optional name of output file to store merging DCOs (do not create the extra output if None)
+            merger_output_path --> [string] Optional name of output file to store merging DCOs (do not create the extra output if None)
             weight_column          --> [string] Name of column in "DoubleCompactObjects" file that contains adaptive sampling weights
                                                     (Leave this as None if you have unweighted samples)
             merges_in_hubble_time  --> [bool]   whether to mask binaries that don't merge in a Hubble time
@@ -417,6 +417,62 @@ def find_detection_rate(path, dco_type="BBH", merger_output_filename=None, weigh
     if snr_step > 1.0:
         warnings.warn("SNR step is greater than 1.0, large step sizes can produce unpredictable results", stacklevel=2)
 
+    if dco_type == "StellarMergers":
+        print("calculating stellar mergers...")
+
+        detection_rate = None  # Detection rates are not calculated for stellar mergers
+
+        COMPAS = ClassCOMPAS.COMPASData(path, Mlower=m1_min, Mupper=m1_max, m2_min=m2_min, binaryFraction=fbin, suppress_reminder=True)
+        COMPAS.setCOMPASData(stellar_mergers=True)
+        COMPAS.set_sw_weights(weight_column)
+        m1=COMPAS.get_COMPAS_variables("BSE_System_Parameters","Mass@ZAMS(1)");
+        m2=COMPAS.get_COMPAS_variables("BSE_System_Parameters","Mass@ZAMS(2)");
+        if use_sampled_mass_ranges:
+            COMPAS.Mlower=min(m1[m1!=m2])*u.Msun    # the m1!=m2 ensures we don't include masses set equal through RLOF at ZAMS
+            COMPAS.Mupper=max(m1)*u.Msun
+            COMPAS.m2_min=min(m2)*u.Msun
+        COMPAS.find_star_forming_mass_per_binary_sampling()
+
+        n_binaries = len(COMPAS.formationTimes)
+
+        # calculate the redshifts array and its equivalents
+        redshifts, n_redshifts_detection, times, time_first_SF, distances, shell_volumes = calculate_redshift_related_params(max_redshift, max_redshift_detection, redshift_step, z_first_SF, cosmology)
+    
+        # find the star forming mass per year per Gpc^3 and convert to total number formed per year per Gpc^3
+        sfr = find_sfr(redshifts, a = aSF, b = bSF, c = cSF, d = dSF) # functional form from Madau & Dickinson 2014
+
+        # Calculate the representative SF mass
+        Average_SF_mass_needed = (COMPAS.mass_evolved_per_binary * COMPAS.n_systems)
+        print('Average_SF_mass_needed = ', Average_SF_mass_needed) # print this, because it might come in handy to know when writing up results :)
+        n_formed = sfr / Average_SF_mass_needed # Divide the star formation rate density by the representative SF mass
+
+        # work out the metallicity distribution at each redshift and probability of drawing each metallicity in COMPAS
+        if np.log(np.min(COMPAS.initialZ)) != np.log(np.max(COMPAS.initialZ)): # Will perform integral over metallicities
+            dPdlogZ, metallicities, p_draw_metallicity = find_metallicity_distribution(redshifts, min_logZ_COMPAS = np.log(np.min(COMPAS.initialZ)),
+                                                                                    max_logZ_COMPAS = np.log(np.max(COMPAS.initialZ)),
+                                                                                    mu0=mu0, muz=muz, sigma_0=sigma0, sigma_z=sigmaz, alpha = alpha,
+                                                                                    min_logZ=min_logZ, max_logZ=max_logZ, step_logZ = step_logZ)
+        else:
+            metallicities = None
+            dPdlogZ = 1
+            p_draw_metallicity = 1
+
+        # calculate the formation and merger rates using what we computed above
+        formation_rate, merger_rate = find_formation_and_merger_rates(n_binaries, redshifts, times, time_first_SF, n_formed, dPdlogZ,
+                                                                    metallicities, p_draw_metallicity, COMPAS.metallicitySystems,
+                                                                    COMPAS.formationTimes, COMPAS.sw_weights)
+        
+        if(merger_output_path!=None): # Store merger rates in an output text file if specified
+            with open(merger_output_path, 'w') as output:
+                output.write('StellarType1atCE \t StellarType2atCE \t MergerRedshift \t MergerRate \n')
+                output.write('-- \t -- \t -- \t Gpc^{-3} yr^{-1} \n')
+                for i in range(n_redshifts_detection):
+                    for j in range(n_binaries):
+                        if(merger_rate[j][i]>0):
+                            output.write(f'{COMPAS.prevStellarType1[j]:.5f}\t{COMPAS.prevStellarType2[j]:.5f}\t{redshifts[i]:.5f}\t{merger_rate[j][i]:.10f}\n')
+        return detection_rate, formation_rate, merger_rate, redshifts, COMPAS
+
+    
     # start by getting the necessary data from the COMPAS file
     COMPAS = ClassCOMPAS.COMPASData(path, Mlower=m1_min, Mupper=m1_max, m2_min=m2_min, binaryFraction=fbin, suppress_reminder=True)
     COMPAS.setCOMPASDCOmask(types=dco_type, withinHubbleTime=merges_hubble_time, pessimistic=pessimistic_CEE, noRLOFafterCEE=no_RLOF_after_CEE)
@@ -482,8 +538,8 @@ def find_detection_rate(path, dco_type="BBH", merger_output_filename=None, weigh
                     * shell_volumes[:n_redshifts_detection] / (1 + redshifts[:n_redshifts_detection])
 
     
-    if(merger_output_filename!=None): # Store merger rates in an output text file if specified
-        with open(path+merger_output_filename, 'w') as output:
+    if(merger_output_path!=None): # Store merger rates in an output text file if specified
+        with open(path+merger_output_path, 'w') as output:
             output.write('Mass1atMerger \t Mass2atMerger \t MergerRedshift \t MergerRate \n')
             output.write('Msun \t Msun \t -- \t Gpc^{-3} yr^{-1} \n')
             for i in range(n_redshifts_detection):
@@ -720,39 +776,60 @@ def plot_rates(save_dir, formation_rate, merger_rate, detection_rate, redshifts,
     fs = 20
     lw = 3
 
-    fig, axes = plt.subplots(2, 2, figsize=(20, 20))
 
-    axes[0,0].plot(redshifts, total_formation_rate, lw=lw)
-    axes[0,0].set_xlabel('Redshift', fontsize=fs)
-    axes[0,0].set_ylabel(r'Formation rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+    if not np.any(detection_rate):
 
-    axes[0,1].plot(redshifts, total_merger_rate, lw=lw)
-    axes[0,1].set_xlabel('Redshift', fontsize=fs)
-    axes[0,1].set_ylabel(r'Merger rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        ax.plot(redshifts, total_formation_rate, lw=lw)
+        ax.set_xlabel('Redshift', fontsize=fs)
+        ax.set_ylabel(r'Formation rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+        ax.text(0.05,0.8, "mu0=%s \nmuz=%s \nsigma0=%s \nsigmaz=%s \nalpha=%s"%(mu0,muz,sigma0,sigmaz,alpha), transform=ax.transAxes, size = fs)
 
-    axes[1,0].plot(redshifts[:len(cumulative_detection_rate)], cumulative_detection_rate, lw=lw)
-    axes[1,0].set_xlabel('Redshift', fontsize=fs)
-    axes[1,0].set_ylabel(r'Cumulative detection rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}yr}]$', fontsize=fs)
-
-    axes[1,1].hist(chirp_masses, weights=detection_rate_by_binary, bins=25, range=(0, 50))
-    axes[1,1].set_xlabel(r'Chirp mass, $\mathcal{M}_c$', fontsize=fs)
-    axes[1,1].set_ylabel(r'Mass distribution of detections $[\rm \frac{\mathrm{d}N}{\mathrm{d}\mathcal{M}_c \mathrm{d}yr}]$', fontsize=fs)
-
-    #########################
-    #Plotvalues
-
-    # Add text upper left corner
-    axes[0,0].text(0.05,0.8, "mu0=%s \nmuz=%s \nsigma0=%s \nsigmaz=%s \nalpha=%s"%(mu0,muz,sigma0,sigmaz,alpha), transform=axes[0,0].transAxes, size = fs) 
-
-    for ax in axes.flatten():
         ax.tick_params(labelsize=0.9*fs)
 
-    # Save and show :)
-    plt.savefig(save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png', bbox_inches='tight') 
-    if show_plot:
-        plt.show()
+        # Save and show :)
+        print("Saving plot to", save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png')
+        plt.savefig(save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png', bbox_inches='tight') 
+        if show_plot:
+            plt.show()
+        else:
+            plt.close()
+    
     else:
-        plt.close()
+        fig, axes = plt.subplots(2, 2, figsize=(20, 20))
+
+        axes[0,0].plot(redshifts, total_formation_rate, lw=lw)
+        axes[0,0].set_xlabel('Redshift', fontsize=fs)
+        axes[0,0].set_ylabel(r'Formation rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+
+        axes[0,1].plot(redshifts, total_merger_rate, lw=lw)
+        axes[0,1].set_xlabel('Redshift', fontsize=fs)
+        axes[0,1].set_ylabel(r'Merger rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+
+        axes[1,0].plot(redshifts[:len(cumulative_detection_rate)], cumulative_detection_rate, lw=lw)
+        axes[1,0].set_xlabel('Redshift', fontsize=fs)
+        axes[1,0].set_ylabel(r'Cumulative detection rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}yr}]$', fontsize=fs)
+
+        axes[1,1].hist(chirp_masses, weights=detection_rate_by_binary, bins=25, range=(0, 50))
+        axes[1,1].set_xlabel(r'Chirp mass, $\mathcal{M}_c$', fontsize=fs)
+        axes[1,1].set_ylabel(r'Mass distribution of detections $[\rm \frac{\mathrm{d}N}{\mathrm{d}\mathcal{M}_c \mathrm{d}yr}]$', fontsize=fs)
+
+        #########################
+        #Plotvalues
+
+        # Add text upper left corner
+        axes[0,0].text(0.05,0.8, "mu0=%s \nmuz=%s \nsigma0=%s \nsigmaz=%s \nalpha=%s"%(mu0,muz,sigma0,sigmaz,alpha), transform=axes[0,0].transAxes, size = fs) 
+
+        for ax in axes.flatten():
+            ax.tick_params(labelsize=0.9*fs)
+
+        # Save and show :)
+        print("Saving plot to", save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png')
+        plt.savefig(save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png', bbox_inches='tight') 
+        if show_plot:
+            plt.show()
+        else:
+            plt.close()
 
 
 
@@ -762,11 +839,14 @@ def parse_cli_args():
                         default="COMPAS_Output.h5")
     # For what DCO would you like the rate?  options: ALL, BHBH, BHNS NSNS
     parser.add_argument("--dco_type", dest='dco_type',
-                        help="Which DCO type you used to calculate rates, one of: ['all', 'BBH', 'BHNS', 'BNS'] ",
+                        help="Which DCO type you used to calculate rates, one of: ['all', 'BBH', 'BHNS', 'BNS', 'StellarMergers'] ",
                         type=str, default="BBH")
     parser.add_argument("--weight", dest='weight_column',
                         help="Name of column w AIS sampling weights, i.e. 'mixture_weight'(leave as None for unweighted samples) ",
                         type=str, default=None)
+    parser.add_argument("--merger_output_path", dest='merger_output_path',
+                        help="If provided, will output a text file with merger rates for each binary at each redshift", type=str,
+                        default=None)
 
     # Options for the redshift evolution and detector sensitivity
     parser.add_argument("--maxz", dest='max_redshift', help="Maximum redshift to use in array", type=float, default=10)
@@ -840,6 +920,7 @@ def main():
     detection_rate, formation_rate, merger_rate, redshifts, COMPAS = find_detection_rate(
         args.path,
         dco_type=args.dco_type,
+        merger_output_path=args.merger_output_path,
         weight_column=args.weight_column,
         max_redshift=args.max_redshift,
         max_redshift_detection=args.max_redshift_detection,
@@ -884,8 +965,12 @@ def main():
     #####################################
     # Plot your result
     start_plot = time.time()
-    chirp_masses = (COMPAS.mass1 * COMPAS.mass2) ** (3. / 5.) / (COMPAS.mass1 + COMPAS.mass2) ** (1. / 5.)
-    plot_rates(args.path, formation_rate, merger_rate, detection_rate, redshifts, chirp_masses, show_plot=False,
+    if args.dco_type == "StellarMergers":
+        detection_rate = np.zeros_like(formation_rate)
+        chirp_masses = np.zeros(len(COMPAS.formationTimes))
+    else:
+        chirp_masses = (COMPAS.mass1 * COMPAS.mass2) ** (3. / 5.) / (COMPAS.mass1 + COMPAS.mass2) ** (1. / 5.)
+    plot_rates(os.path.dirname(args.path), formation_rate, merger_rate, detection_rate, redshifts, chirp_masses, show_plot=False,
                mu0=args.mu0, muz=args.muz, sigma0=args.sigma0, sigmaz=args.sigmaz, alpha=args.alpha)
     end_plot = time.time()
 
