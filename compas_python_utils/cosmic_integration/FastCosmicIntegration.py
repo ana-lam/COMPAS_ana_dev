@@ -461,15 +461,25 @@ def find_detection_rate(path, dco_type="BBH", merger_output_path=None, weight_co
         formation_rate, merger_rate = find_formation_and_merger_rates(n_binaries, redshifts, times, time_first_SF, n_formed, dPdlogZ,
                                                                     metallicities, p_draw_metallicity, COMPAS.metallicitySystems,
                                                                     COMPAS.formationTimes, COMPAS.sw_weights)
-        
+
         if(merger_output_path!=None): # Store merger rates in an output text file if specified
-            with open(merger_output_path, 'w') as output:
+            base = merger_output_path.replace(".txt", "")
+            with open(base + "_detailed.txt", 'w') as output:
                 output.write('StellarType1atCE \t StellarType2atCE \t MergerRedshift \t MergerRate \n')
                 output.write('-- \t -- \t -- \t Gpc^{-3} yr^{-1} \n')
                 for i in range(n_redshifts_detection):
                     for j in range(n_binaries):
                         if(merger_rate[j][i]>0):
                             output.write(f'{COMPAS.prevStellarType1[j]:.5f}\t{COMPAS.prevStellarType2[j]:.5f}\t{redshifts[i]:.5f}\t{merger_rate[j][i]:.10f}\n')
+            
+            total_merger_rate = np.sum(merger_rate, axis=0)
+            total_formation_rate = np.sum(formation_rate, axis=0)
+            with open(base + "_total.txt", "w") as output:
+                output.write('MergerRedshift \t TotalMergerRate \t TotalFormationRate \n')
+                output.write('-- \t Gpc^{-3} yr^{-1} \t Gpc^{-3} yr^{-1} \n')
+                for z, rate, formation in zip(redshifts, total_merger_rate, total_formation_rate):
+                    output.write(f'{z:.5f}\t{rate:.10f}\t{formation:.10f}\n')
+
         return detection_rate, formation_rate, merger_rate, redshifts, COMPAS
 
     
@@ -778,14 +788,15 @@ def plot_rates(save_dir, formation_rate, merger_rate, detection_rate, redshifts,
 
 
     if not np.any(detection_rate):
-
+        Z= save_dir.split("/")[-2].replace("_", "=")
         fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-        ax.plot(redshifts, total_formation_rate, lw=lw)
+        ax.plot(redshifts, total_merger_rate, lw=lw)
         ax.set_xlabel('Redshift', fontsize=fs)
-        ax.set_ylabel(r'Formation rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
+        ax.set_ylabel(r'Stellar Merger rate $[\rm \frac{\mathrm{d}N}{\mathrm{d}Gpc^3 \mathrm{d}yr}]$', fontsize=fs)
         ax.text(0.05,0.8, "mu0=%s \nmuz=%s \nsigma0=%s \nsigmaz=%s \nalpha=%s"%(mu0,muz,sigma0,sigmaz,alpha), transform=ax.transAxes, size = fs)
-
+        ax.set_title("Metallicity: %s"%(Z), fontsize=fs)
         ax.tick_params(labelsize=0.9*fs)
+        ax.set_yscale('log')
 
         # Save and show :)
         print("Saving plot to", save_dir +'Rate_Info'+"mu0%s_muz%s_alpha%s_sigma0%s_sigmaz%s"%(mu0,muz,alpha,sigma0, sigmaz)+'.png')
