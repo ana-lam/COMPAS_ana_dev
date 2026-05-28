@@ -436,9 +436,18 @@ def find_detection_rate(path, dco_type="BHBH", merger_output_filename=None, weig
 
     # start by getting the necessary data from the COMPAS file
     COMPAS = ClassCOMPAS.COMPASData(path, Mlower=m1_min, Mupper=m1_max, m2_min=m2_min, binaryFraction=fbin, suppress_reminder=True)
-    COMPAS.setCOMPASDCOmask(types=dco_type, withinHubbleTime=merges_hubble_time, pessimistic=pessimistic_CEE, noRLOFafterCEE=no_RLOF_after_CEE)
-    COMPAS.setCOMPASData()
-    COMPAS.set_sw_weights(weight_column)
+
+    if dco_type == "StellarMerger":
+        COMPAS.setCOMPASStellarMergerMask(excludeMergerAtBirth=True, pessimistic=True)
+        COMPAS.setCOMPASStellarMergerData()
+        COMPAS.DCOmask = COMPAS.StellarMergerMask
+    else:
+        COMPAS.setCOMPASDCOmask(types=dco_type, withinHubbleTime=merges_hubble_time, pessimistic=pessimistic_CEE, noRLOFafterCEE=no_RLOF_after_CEE)
+        COMPAS.setCOMPASData()
+    
+    if dco_type != "StellarMerger":
+        COMPAS.set_sw_weights(weight_column)
+
     m1=COMPAS.get_COMPAS_variables("BSE_System_Parameters","Mass@ZAMS(1)");
     m2=COMPAS.get_COMPAS_variables("BSE_System_Parameters","Mass@ZAMS(2)");
     if use_sampled_mass_ranges:
@@ -498,18 +507,27 @@ def find_detection_rate(path, dco_type="BHBH", merger_output_filename=None, weig
                                                                     metallicities, p_draw_metallicity, COMPAS.metallicitySystems,
                                                                     COMPAS.delayTimes, COMPAS.sw_weights)
 
-    # create lookup tables for the SNR at 1Mpc as a function of the masses and the probability of detection as a function of SNR
-    snr_grid_at_1Mpc, detection_probability_from_snr = compute_snr_and_detection_grids(dco_type, sensitivity, snr_threshold, Mc_max, Mc_step,
-                                                                                    eta_max, eta_step, snr_max, snr_step)
+    if dco_type == "StellarMerger":
+        # Stellar mergers are not GW sources — no SNR grid or detection probability needed.
+        # The "detection rate" is just the merger rate integrated over the shell volume,
+        # i.e. every stellar merger that occurs is counted (P_det = 1 everywhere).
+        detection_rate = merger_rate[:, :n_redshifts_detection] \
+                     * shell_volumes[:n_redshifts_detection] \
+                     / (1 + redshifts[:n_redshifts_detection])
 
-    # use lookup tables to find the probability of detecting each binary at each redshift
-    detection_probability = find_detection_probability(chirp_masses, etas, redshifts, distances, n_redshifts_detection, n_binaries,
-                                                        snr_grid_at_1Mpc, detection_probability_from_snr, Mc_step, eta_step, snr_step)
+    else:
+        # create lookup tables for the SNR at 1Mpc as a function of the masses and the probability of detection as a function of SNR
+        snr_grid_at_1Mpc, detection_probability_from_snr = compute_snr_and_detection_grids(dco_type, sensitivity, snr_threshold, Mc_max, Mc_step,
+                                                                                        eta_max, eta_step, snr_max, snr_step)
 
-    # finally, compute the detection rate using Neijssel+19 Eq. 2
-    detection_rate = np.zeros(shape=(n_binaries, n_redshifts_detection))
-    detection_rate = merger_rate[:, :n_redshifts_detection] * detection_probability \
-                    * shell_volumes[:n_redshifts_detection] / (1 + redshifts[:n_redshifts_detection])
+        # use lookup tables to find the probability of detecting each binary at each redshift
+        detection_probability = find_detection_probability(chirp_masses, etas, redshifts, distances, n_redshifts_detection, n_binaries,
+                                                            snr_grid_at_1Mpc, detection_probability_from_snr, Mc_step, eta_step, snr_step)
+
+        # finally, compute the detection rate using Neijssel+19 Eq. 2
+        detection_rate = np.zeros(shape=(n_binaries, n_redshifts_detection))
+        detection_rate = merger_rate[:, :n_redshifts_detection] * detection_probability \
+                        * shell_volumes[:n_redshifts_detection] / (1 + redshifts[:n_redshifts_detection])
 
     
     if(merger_output_filename!=None): # Store merger rates in an output text file if specified
@@ -650,7 +668,10 @@ def append_rates(path, detection_rate, formation_rate, merger_rate, redshifts, C
         # Write the rates as a separate dataset
         # re-arrange your list of rate parameters
         DCO_to_rate_mask     = COMPAS.DCOmask #save this bool for easy conversion between BSE_Double_Compact_Objects, and CI weights
-        DCO_seeds            = h_new['BSE_Double_Compact_Objects']['SEED'][DCO_to_rate_mask] # Get DCO seed
+        if dco_type == "StellarMerger":
+            DCO_seeds = h_new['BSE_System_Parameters']['SEED'][()][DCO_to_rate_mask]
+        else:
+            DCO_seeds            = h_new['BSE_Double_Compact_Objects']['SEED'][DCO_to_rate_mask] # Get DCO seed
         rate_data_list       = [DCO_seeds, DCO_to_rate_mask , save_redshifts,  save_merger_rate, merger_rate[:,0], save_detection_rate]
         rate_list_names      = ['SEED', 'DCOmask', 'redshifts',  'merger_rate','merger_rate_z0', 'detection_rate'+sensitivity]
         for i, data in enumerate(rate_data_list):
@@ -801,9 +822,9 @@ def parse_cli_args():
     parser.add_argument("--path", dest='path', help="Path to the COMPAS file that contains the output", type=str,
                         default="COMPAS_Output.h5")
     
-    # For what DCO would you like the rate?  options: ALL, BHBH, BHNS NSNS, WDWD
+    # For what DCO would you like the rate?  options: ALL, BHBH, BHNS NSNS, WDWD, StellarMerger
     parser.add_argument("--dco_type", dest='dco_type',
-                        help="Which DCO type you used to calculate rates, one of: ['all', 'BHBH', 'NSNS', 'WDWD', 'BHNS', 'NSWD', 'WDBH'] ",
+                        help="Which DCO type you used to calculate rates, one of: ['all', 'BHBH', 'NSNS', 'WDWD', 'BHNS', 'NSWD', 'WDBH', 'StellarMerger'] ",
                         type=str, default="BHBH")
     parser.add_argument("--weight", dest='weight_column',
                         help="Name of column w AIS sampling weights, i.e. 'mixture_weight'(leave as None for unweighted samples) ",

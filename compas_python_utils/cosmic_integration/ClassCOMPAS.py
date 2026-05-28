@@ -41,6 +41,7 @@ class COMPASData(object):
         self.mass1 = None  # Msun
         self.mass2 = None  # Msun
         self.DCOmask = None
+        self.StellarMergerMask = None
         self.allTypesMask = None
         self.BHBHmask = None
         self.NSNSmask = None
@@ -73,6 +74,43 @@ class COMPASData(object):
             print("ClassCOMPAS: Remember to self.setCOMPASDCOmask()")
             print("                    then self.setCOMPASData()")
             print("          and optionally self.setGridAndMassEvolved() if using a metallicity grid")
+
+
+    def setCOMPASStellarMergerMask(self, excludeMergerAtBirth=True, pessimistic=True
+                            ):
+        # Build a mask for stellar mergers
+        # excludeMergerAtBirth: if True, exclude systems that merge at birth
+        # pessimistic: if True, HG donors that experienced an 'optimistic' CE event are treated as mergers
+
+        merger_flag, merger_at_birth_flag, sys_seeds = self.get_COMPAS_variables("BSE_System_Parameters", ["Stellar_Merger", "Merger_At_Birth", "SEED"])
+
+        merger_mask = merger_flag.astype(bool)
+
+        if excludeMergerAtBirth:
+            merger_mask = np.logical_and(merger_mask, ~merger_at_birth_flag.astype(bool))
+
+        ce_seeds = self.get_COMPAS_variables("BSE_Common_Envelopes", "SEED")
+        optimistic_flag = self.get_COMPAS_variables(
+            "BSE_Common_Envelopes", "Optimistic_CE"
+        ).astype(bool)
+        optimistic_ce_seeds = np.unique(ce_seeds[optimistic_flag])
+
+        had_optimistic_ce = np.isin(sys_seeds, optimistic_ce_seeds)
+
+        if pessimistic:
+            self.optimisticmask = ~had_optimistic_ce
+        else:
+            merger_mask = np.logical_and(merger_mask, ~had_optimistic_ce)
+            self.optimisticmask = np.repeat(True, len(sys_seeds))
+
+        self.StellarMergerMask = merger_mask
+        self.n_systems = len(sys_seeds)
+
+        print(f"setCOMPASStellarMergerMask: {np.sum(merger_mask)} stellar mergers "
+          f"selected out of {self.n_systems} total systems "
+          f"(pessimisticCEE={pessimistic}, "
+          f"excludeMergerAtBirth={excludeMergerAtBirth}).")
+
 
     def setCOMPASDCOmask(
         self, types="BHBH", withinHubbleTime=True, pessimistic=True, noRLOFafterCEE=True
@@ -174,6 +212,44 @@ class COMPASData(object):
             self.initialZ = Data["BSE_System_Parameters"]["Metallicity@ZAMS(1)"][()]
         self.metallicityGrid = np.unique(self.initialZ)
         Data.close()
+
+
+    def setCOMPASStellarMergerData(self):
+        # Load data for stellar merger systems, analogous to setCOMPASData but for stellar mergers
+
+        # the delay time for stellar mergers is the stellar lifetime at merger
+
+        (mass1_zams, mass2_zams, metallicities, merger_times, sys_seeds) = self.get_COMPAS_variables(
+            "BSE_System_Parameters", 
+            ['Mass@ZAMS(1)', 'Mass@ZAMS(2)', 'Metallicity@ZAMS(1)', 'Stellar_Merger_Time', 'SEED']
+        )
+
+        if self.StellarMergerMask is None:
+            raise ValueError("Stellar Merger Mask not set. Please run self.setCOMPASStellarMergerMask() first.")
+        
+        if np.sum(self.StellarMergerMask) == 0:
+            raise ValueError("No stellar mergers found with the current mask. Please check your system parameters table, or change your mask settings." )
+        
+        self.seedsStellarMerger = sys_seeds[self.StellarMergerMask]
+        self.initialZ = metallicities 
+        self.metallicitySystems = metallicities[self.StellarMergerMask]
+        self.n_systems = len(sys_seeds)
+
+        # delay time (no DCO inspiral)
+        self.delayTimes = merger_times[self.StellarMergerMask]
+        self.mass1 = mass1_zams[self.StellarMergerMask]
+        self.mass2 = mass2_zams[self.StellarMergerMask]
+
+        if self.lazyData:
+            self.q = np.divide(self.mass2, self.mass1)
+            boolq = self.mass2 > self.mass1
+            self.q[boolq] = np.divide(self.mass1[boolq], self.mass2[boolq])
+            self.mChirp = np.divide(
+                (np.multiply(self.mass2, self.mass1) ** (3.0/5.0)),
+                (np.add(self.mass2, self.mass1)**(1.0/5.0)),
+            )
+            self.Hubble = None 
+            
 
     def setCOMPASData(self):
         
